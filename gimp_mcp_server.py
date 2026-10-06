@@ -9,6 +9,7 @@ import logging
 import base64
 import traceback
 import time
+import os
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -16,6 +17,10 @@ logger = logging.getLogger("GimpMCPServer")
 
 GIMP_HOST = 'localhost'
 GIMP_PORT = 9877
+GIMP_CONNECT_TIMEOUT = 10
+# Seconds to wait between bytes of a response; override with GIMP_MCP_READ_TIMEOUT.
+GIMP_READ_TIMEOUT = float(os.environ.get("GIMP_MCP_READ_TIMEOUT", 300))
+RECV_CHUNK_SIZE = 1024 * 1024
 
 class GimpConnection:
     def __init__(self, host=GIMP_HOST, port=GIMP_PORT):
@@ -28,7 +33,7 @@ class GimpConnection:
             return
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.settimeout(10)
+            self.sock.settimeout(GIMP_CONNECT_TIMEOUT)
             self.sock.connect((self.host, self.port))
             logger.info(f"Connected to GIMP at {self.host}:{self.port}")
         except Exception as e:
@@ -50,18 +55,22 @@ class GimpConnection:
         command = {"type": command_type, "params": params or {"args": []}}
         try:
             self.sock.sendall(json.dumps(command).encode('utf-8') + b'\n')
-            response_data = b''
+            # Large operations (e.g. full-res bitmap export) can take a while before
+            # GIMP sends anything back, so reads get a longer timeout than connect.
+            self.sock.settimeout(GIMP_READ_TIMEOUT)
+            # The plugin terminates each response with '\n' (json.dumps never emits a
+            # raw newline); older plugins just close the socket. Collect chunks and
+            # parse once at the end — re-parsing the growing buffer after every chunk
+            # is quadratic and stalls on multi-MB image payloads.
+            chunks = []
             while True:
-                chunk = self.sock.recv(8192)
+                chunk = self.sock.recv(RECV_CHUNK_SIZE)
                 if not chunk:
                     break
-                response_data += chunk
-                try:
-                    json.loads(response_data.decode('utf-8'))
+                chunks.append(chunk)
+                if chunk.endswith(b'\n'):
                     break
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    continue
-            return json.loads(response_data.decode('utf-8'))
+            return json.loads(b''.join(chunks).decode('utf-8'))
         except Exception as e:
             logger.error(f"Communication error: {e}")
             raise Exception(f"Error communicating with GIMP: {e}")
