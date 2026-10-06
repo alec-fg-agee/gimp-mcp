@@ -199,7 +199,11 @@ class MCPPlugin(Gimp.PlugIn):
             if not data:
                 break
             buffer += data
-            
+
+            # The MCP server newline-terminates each request
+            if buffer.endswith(b'\n'):
+                break
+
             # Check if we have a complete message
             # For simplicity, assume messages end with newline or are complete JSON
             try:
@@ -234,13 +238,10 @@ class MCPPlugin(Gimp.PlugIn):
         else:
             response_str = str(response)
             
-        # Send response in chunks for large data
-        response_bytes = response_str.encode('utf-8')
-        bytes_sent = 0
-        while bytes_sent < len(response_bytes):
-            chunk = response_bytes[bytes_sent:bytes_sent + 8192]
-            client.sendall(chunk)
-            bytes_sent += len(chunk)
+        # Newline-terminate so the MCP server knows the response is complete without
+        # re-parsing it (json.dumps never emits a raw newline). sendall handles
+        # large payloads on its own.
+        client.sendall(response_str.encode('utf-8') + b'\n')
             
         if self.auto_disconnect_client:
             client.close()
